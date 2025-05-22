@@ -1,0 +1,106 @@
+// backend/server.js
+import express from 'express';
+import cors from 'cors';
+import fs from 'fs';
+import { v4 as uuidv4 } from 'uuid';
+import mercadopago from 'mercadopago';
+
+const app = express();
+const PORT = 3001;
+
+mercadopago.configure({
+  access_token: 'TEST-1310318310862557-052111-084cee99c6e186545d49ea2cedf7022d-2270877045'
+});
+
+app.use(cors());
+app.use(express.json());
+
+// Simples banco de dados em JSON
+const DB_FILE = './rifa-db.json';
+let db = { compradores: [], historico: [] };
+
+if (fs.existsSync(DB_FILE)) {
+  db = JSON.parse(fs.readFileSync(DB_FILE));
+}
+
+const salvarDB = () => fs.writeFileSync(DB_FILE, JSON.stringify(db, null, 2));
+
+// Retorna os números disponíveis (1 a 1000 que ainda não foram pagos)
+app.get('/api/rifas/disponiveis', (req, res) => {
+  const ocupados = db.compradores.map(c => c.numero);
+  const disponiveis = Array.from({ length: 1000 }, (_, i) => i + 1).filter(n => !ocupados.includes(n));
+  res.json(disponiveis);
+});
+
+// Lista de compradores
+app.get('/api/rifas/compradores', (req, res) => {
+  res.json(db.compradores);
+});
+
+// Histórico de sorteios
+app.get('/api/rifas/historico', (req, res) => {
+  res.json(db.historico);
+});
+
+// Remover comprador pendente
+app.delete('/api/rifas/remover/:id', (req, res) => {
+  const id = req.params.id;
+  db.compradores = db.compradores.filter(c => c._id !== id);
+  salvarDB();
+  res.sendStatus(200);
+});
+
+// Reenviar pagamento
+app.post('/api/rifas/reenviar/:id', async (req, res) => {
+  const comprador = db.compradores.find(c => c._id === req.params.id);
+  if (!comprador) return res.sendStatus(404);
+
+  const preference = {
+    items: [{ title: `Rifa Número ${comprador.numero}`, quantity: 1, currency_id: 'BRL', unit_price: 10 }],
+    payer: { name: comprador.nome },
+    notification_url: 'https://webhook.site/teste',
+    back_urls: { success: 'http://localhost:5173' }
+  };
+
+  try {
+    const response = await mercadopago.preferences.create(preference);
+    res.json({ init_point: response.body.init_point });
+  } catch (e) {
+    res.status(500).json({ error: 'Erro ao gerar link' });
+  }
+});
+
+// Comprar rifa
+app.post('/api/rifas/comprar', async (req, res) => {
+  const { numero, nome, telefone } = req.body;
+  const id = uuidv4();
+
+  const preference = {
+    items: [{ title: `Rifa Número ${numero}`, quantity: 1, currency_id: 'BRL', unit_price: 10 }],
+    payer: { name: nome },
+    notification_url: 'https://webhook.site/teste',
+    back_urls: { success: 'http://localhost:5173' },
+    auto_return: 'approved'
+  };
+
+  try {
+    const response = await mercadopago.preferences.create(preference);
+    db.compradores.push({ _id: id, numero, nome, telefone, status: 'pendente', pagamento_id: null });
+    salvarDB();
+    res.json({ init_point: response.body.init_point });
+  } catch (err) {
+    res.status(500).json({ error: 'Erro ao criar pagamento' });
+  }
+});
+
+// Sorteio
+app.post('/api/rifas/sortear', (req, res) => {
+  const sorteado = req.body;
+  db.historico.unshift(sorteado);
+  salvarDB();
+  res.sendStatus(200);
+});
+
+app.listen(PORT, () => {
+  console.log(`Servidor backend rodando em http://localhost:${PORT}`);
+});
